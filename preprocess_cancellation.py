@@ -22,6 +22,7 @@ logger = logging.getLogger("prepropress_cancellation")
 shapely = None
 try:
     import shapely.geometry
+    import numpy
 except ImportError:
     logger.info("Shapely not found, complex hulls disabled")
 except OSError:
@@ -112,14 +113,22 @@ class SlicerProcessor:
         self.parser.hull = None
 
     def get_hull_bounds(self, hull):
-        xmin, ymin, xmax, ymax = hull.bounding_box()
-        center = Point((xmax + xmin) / 2, (ymax + ymin) / 2)
-        bb = [
-            Point(xmin, ymin),
-            Point(xmin, ymax),
-            Point(xmax, ymax),
-            Point(xmax, ymin),
-        ]
+        if shapely:
+            points_array = numpy.frombuffer(hull.point_bytes())
+            points_array.shape = (points_array.size // 2, 2)
+            points = shapely.MultiPoint(points_array)
+            hull = points.convex_hull.simplify(0.5)
+            center = hull.centroid
+            bb = [Point(x,y) for x,y in hull.exterior.coords]
+        else:
+            xmin, ymin, xmax, ymax = hull.bounding_box()
+            center = Point((xmax + xmin) / 2, (ymax + ymin) / 2)
+            bb = [
+                Point(xmin, ymin),
+                Point(xmin, ymax),
+                Point(xmax, ymax),
+                Point(xmax, ymin),
+            ]
         return center, bb
 
     def output_object_definitions(self):

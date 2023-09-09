@@ -23,6 +23,7 @@ struct Hull {
     static int py_set_points(Hull *self, PyObject *args, void *closure);
 
     static PyObject *py_bounding_box(Hull *self, PyObject *args);
+    static PyObject *py_point_bytes(Hull *self, PyObject *args);
 };
 
 extern PyTypeObject Hull_type;

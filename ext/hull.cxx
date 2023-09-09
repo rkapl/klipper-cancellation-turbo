@@ -84,6 +84,27 @@ PyObject* Hull::py_bounding_box(Hull *self, PyObject *args) {
     );
 }
 
+PyObject* Hull::py_point_bytes(Hull *self, PyObject *args) {
+
+    uint32_t pointsCount = self->data.points.size();
+    auto hdrSize = 9;
+
+    PyObject *buf = PyBytes_FromStringAndSize(NULL, 0);
+    _PyBytes_Resize(&buf, sizeof(Point) * pointsCount);
+    if (!buf)
+        return nullptr;
+        
+    Py_buffer buf_view;
+    if (PyObject_GetBuffer(buf, &buf_view, 0) < 0)
+        return nullptr;
+
+    memcpy(buf_view.buf, self->data.points.data(), sizeof(Point) * pointsCount);
+
+    PyBuffer_Release(&buf_view);
+    return buf;
+}
+
+
 static PyGetSetDef Hull_getset[] = {
     {"points", (getter) Hull::py_get_points, (setter) Hull::py_set_points, "list of collected points for hull calculation"},
     {NULL}
@@ -92,6 +113,9 @@ static PyGetSetDef Hull_getset[] = {
 static PyMethodDef Hull_methods[] = {
     {"bounding_box", (PyCFunction) Hull::py_bounding_box, METH_NOARGS,
         "Axis-aligned bounding box as (xmin, ymin, xmax, ymax)"
+    },
+    {"point_bytes", (PyCFunction) Hull::py_point_bytes, METH_NOARGS,
+        "Packed points"
     },
     {NULL}
 };
