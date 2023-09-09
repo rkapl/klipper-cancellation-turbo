@@ -7,10 +7,11 @@ import logging
 import pathlib
 import re
 import shutil
-import statistics
+import enum
 import sys
 import tempfile
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple, TypeVar
+from preprocess_cancellation_cext import Hull, Point, GCodeParser
 
 __version__ = "0.2.0"
 
@@ -28,118 +29,11 @@ except OSError:
 
 HEADER_MARKER = f"; Pre-Processed for Cancel-Object support by preprocess_cancellation v{__version__}\n"
 
-
 PathLike = TypeVar("PathLike", str, pathlib.Path)
-
-
-class Point(NamedTuple):
-    x: float
-    y: float
-
-
-class HullTracker:
-    def add_point(self, point: Point):
-        ...
-
-    def center(self) -> Point:
-        ...
-
-    def exterior(self) -> list[Point]:
-        ...
-
-    @classmethod
-    def create(cls):
-        if shapely:
-            return ShapelyHullTracker()
-        return SimpleHullTracker()
-
-
-class SimpleHullTracker(HullTracker):
-    def __init__(self) -> None:
-        self.xmin = 999999
-        self.ymin = 999999
-        self.xmax = -999999
-        self.ymax = -999999
-
-        self.count_points = 0
-        self.xsum = 0
-        self.ysum = 0
-
-    def add_point(self, point: Point):
-        self.xsum += point.x
-        self.ysum += point.y
-        self.count_points += 1
-
-        if point.x < self.xmin:
-            self.xmin = point.x
-        if point.y < self.ymin:
-            self.ymin = point.y
-        if point.x > self.xmax:
-            self.xmax = point.x
-        if point.y > self.ymax:
-            self.ymax = point.y
-
-    def center(self):
-        if not self.count_points:
-            return
-
-        return Point(
-            self.xsum / self.count_points,
-            self.ysum / self.count_points,
-        )
-
-    def exterior(self):
-        if not self.count_points:
-            return
-
-        return boundingbox((self.xmin, self.ymin), (self.xmax, self.ymax))
-
-
-class ShapelyHullTracker(HullTracker):
-    def __init__(self):
-        self.pos = None
-        self.points: Set[Point] = set()
-
-    def add_point(self, point: Point):
-        self.points.add(point)
-
-    def center(self):
-        if not self.points:
-            return
-
-        return Point(
-            statistics.mean(p[0] for p in self.points),
-            statistics.mean(p[1] for p in self.points),
-        )
-
-    def exterior(self):
-        if not self.points:
-            return
-
-        return list(
-            shapely.geometry.MultiPoint(list(self.points))
-            .convex_hull.simplify(0.02, preserve_topology=False)
-            .exterior.coords
-        )
-
 
 class KnownObject(NamedTuple):
     name: str
-    hull: HullTracker
-
-
-def boundingbox(pmin: Point, pmax: Point):
-    return [
-        (pmin[0], pmin[1]),
-        (pmin[0], pmax[1]),
-        (pmax[0], pmax[1]),
-        (pmax[0], pmin[1]),
-    ]
-
-
-def _dump_coords(coords: List[float]) -> str:
-    return ",".join(map("{:0.3f}".format, coords))
-
+    hull: Hull
 
 def _clean_id(id):
     return re.sub(r"\W+", "_", id).strip("_")
@@ -168,15 +62,12 @@ def define_object(
     name,
     center: Optional[Point] = None,
     polygon: Optional[Point] = None,
-    region: Optional[List[Point]] = None,
 ):
     yield f"EXCLUDE_OBJECT_DEFINE NAME={name}"
     if center:
-        yield f" CENTER={_dump_coords(center)}"
+        yield f" CENTER={center.x:0.3f},{center.y:0.3f}"
     if polygon:
-        yield f" POLYGON={json.dumps(polygon, separators=(',', ':'))}"
-    if region:
-        yield f" REGION={_dump_coords(region, separators=(',', ':'))}"
+        yield f" POLYGON={json.dumps([[p.x, p.y] for p in polygon])}"
     yield "\n"
 
 
@@ -187,6 +78,93 @@ def object_start_marker(object_name):
 def object_end_marker(object_name):
     yield f"EXCLUDE_OBJECT_END NAME={object_name}\n"
 
+class SlicerProcessor:
+    known_objects: Dict[str, KnownObject]
+    interest_map: Dict[int, function]
+    def __init__(self):
+        self.known_objects = {}
+        self.interest_map = {}
+        self.parser = GCodeParser()
+        self.last_object_id = None
+
+    def register_interest(self, line, callback):
+        id = len(self.interest_map) + 1
+        self.parser.register_interest(line, id)
+        self.interest_map[id] = callback
+        
+    # Registers interesting lines for the first stage where we scan for objects and their boundaries
+    def slicer_start_scan(self):
+        pass
+
+    # Registers interesting lines for the second stage where we replace slicer markers by klipper markers
+    def slicer_start_output(self):
+        pass
+
+    def slicer_header(self):
+        return []
+
+    def start_object_id(self, object_id: str):
+        if object_id not in self.known_objects:
+            self.known_objects[object_id] = KnownObject(_clean_id(object_id), Hull())
+            self.parser.hull = self.known_objects[object_id].hull
+
+    def stop_object(self):
+        self.parser.hull = None
+
+    def get_hull_bounds(self, hull):
+        xmin, ymin, xmax, ymax = hull.bounding_box()
+        center = Point((xmax + xmin) / 2, (ymax + ymin) / 2)
+        bb = [
+            Point(xmin, ymin),
+            Point(xmin, ymax),
+            Point(xmax, ymax),
+            Point(xmax, ymin),
+        ]
+        return center, bb
+
+    def output_object_definitions(self):
+        yield from header(len(self.known_objects))
+        for object_id, hull in self.known_objects.values():
+            center, polygon = self.get_hull_bounds(hull)
+            yield from define_object(
+                object_id,
+                center=center,
+                polygon=polygon,
+            )
+
+    def output_object_start(self, id):
+        self.last_object_id = id
+        yield from object_start_marker(self.known_objects[id].name)
+    
+    def output_object_end(self):
+        yield from object_end_marker(self.known_objects[self.last_object_id].name)
+
+class SlicerSlic3rFamily(SlicerProcessor):
+    @staticmethod
+    def _get_id(line):
+        return line.split("printing object")[1].strip()
+
+    def slicer_start_scan(self):
+        self.register_interest('; printing object ', 
+            lambda line: self.start_object_id(SlicerSlic3rFamily._get_id(line)))
+        self.register_interest('; stop printing object ',lambda _: self.stop_object())
+
+    def slicer_start_output(self):
+        self.register_interest('; printing object ', 
+            lambda line: self.output_object_start(SlicerSlic3rFamily._get_id(line)))
+        self.register_interest('; stop printing object ', lambda _: self.output_object_end())
+
+    def slicer_header(self):
+        yield from self.output_object_definitions()
+
+class SlicerCura(SlicerProcessor):
+    pass
+
+class SlicerIdeamaker(SlicerProcessor):
+    pass
+
+class SlicerM486(SlicerProcessor):
+    pass
 
 def preprocess_pipe(infile):
     yield from infile
@@ -310,6 +288,7 @@ def preprocess_cura(infile):
 
 
 def preprocess_slicer(infile):
+
     known_objects: Dict[str, KnownObject] = {}
     current_hull: Optional[HullTracker] = None
     for line in infile:
@@ -423,11 +402,12 @@ def preprocess_ideamaker(infile):
 #   Kiri:Moto:  does not output any markers into GCode
 #   Simplify3D: I was unable to figure out multiple processes
 SLICERS: dict[str, Tuple[str, callable]] = {
-    "superslicer": ("; generated by SuperSlicer", preprocess_slicer),
-    "prusaslicer": ("; generated by PrusaSlicer", preprocess_slicer),
-    "slic3r": ("; generated by Slic3r", preprocess_slicer),
-    "cura": (";Generated with Cura_SteamEngine", preprocess_cura),
-    "ideamaker": (";Sliced by ideaMaker", preprocess_ideamaker),
+    "superslicer": ("; generated by SuperSlicer", SlicerSlic3rFamily),
+    "prusaslicer": ("; generated by PrusaSlicer", SlicerSlic3rFamily),
+    "slic3r": ("; generated by Slic3r", SlicerSlic3rFamily),
+    "cura": (";Generated with Cura_SteamEngine", SlicerCura),
+    "ideamaker": (";Sliced by ideaMaker", SlicerIdeamaker),
+    "m486": ("M486", SlicerM486),
 }
 
 
@@ -437,33 +417,69 @@ def identify_slicer_marker(line):
             logger.debug("Identified slicer %s", name)
             return processor
 
+def _process_lines(infile, slicer_factory):
+    slicer: SlicerProcessor = slicer_factory()
 
-def preprocessor(infile, outfile):
-    logger.debug("Identifying slicer")
-    found_m486 = False
-    processor = None
-    for line in infile:
-        if line.startswith("EXCLUDE_OBJECT_DEFINE") or line.startswith("DEFINE_OBJECT"):
-            logger.info("GCode already supports cancellation")
-            infile.seek(0)
-            outfile.write(infile.read())
-            return True
-
-        if line.startswith("M486"):
-            if not found_m486:
-                logger.info("File has existing M486 markers, converting")
-            found_m486 = True
-            processor = preprocess_m486
-
-        if not processor:
-            processor = identify_slicer_marker(line)
-
+    # Identify objects
     infile.seek(0)
-    for line in processor(infile):
+    slicer.slicer_start_scan()
+    for line in infile:
+        r = slicer.parser.feed_line(line) 
+        if r is not None:
+            slicer.interest_map[r](line)
+
+
+    # Replacement & Output
+    slicer.interest_map = {}
+    slicer.parser.hull = None
+    slicer.parser.clear_interests()
+    slicer.slicer_start_output()
+    infile.seek(0)
+
+    yield from slicer.slicer_header()
+    for line in infile:
+        yield line
+        r = slicer.parser.feed_line(line) 
+        if r is not None:
+            more = slicer.interest_map[r](line)
+            if more is not None:
+                yield from more
+
+def preprocessor(infile, outfile, slicer_factory=None):
+    I_PROCESSED = 1
+    I_SLICER_MARKER = 2
+    parser = GCodeParser()
+
+    # Stage 1, identify slicers
+    if slicer_factory is None:
+        logger.debug("Identifying slicer")
+        parser.register_interest('EXCLUDE_OBJECT_DEFINE', I_PROCESSED)
+        parser.register_interest('DEFINE_OBJECT', I_PROCESSED)
+        for marker, _ in SLICERS.values():
+            parser.register_interest(marker, I_SLICER_MARKER)
+
+        for line in infile:
+            interest = parser.feed_line(line)
+            if interest is None:
+                continue
+
+            if interest == I_PROCESSED:
+                logger.info("GCode already supports cancellation")
+                infile.seek(0)
+                outfile.write(infile.read())
+                return True
+            elif interest == I_SLICER_MARKER:
+                slicer_factory = identify_slicer_marker(line)
+
+    if slicer_factory is None:
+        logger.warn("Could not identify slicer")
+        return False
+
+    # Stage 2, output & replacement
+    for line in _process_lines(infile, slicer_factory):
         outfile.write(line)
 
     return True
-
 
 def process_file_for_cancellation(filename: PathLike, output_suffix=None) -> int:
     filepath = pathlib.Path(filename)

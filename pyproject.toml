@@ -7,6 +7,10 @@ authors = ["Franklyn Tackitt <im@frank.af>"]
 repository = "https://github.com/kageurufu/cancelobject-preprocessor"
 license = "GPL-3.0-only"
 
+[tool.poetry.build]
+script = "build.py"
+generate-setup-file = true
+
 [tool.poetry.urls]
 "Bug Tracker" = "https://github.com/kageurufu/cancelobject-preprocessor/issues"
 
