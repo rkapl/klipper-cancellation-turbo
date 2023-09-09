@@ -13,7 +13,7 @@ class TestHull(unittest.TestCase):
         h.points = point_list
 
         # tuples are dumb and not comparable
-        self.assertEqual(point2tuples(h.points), point2tuples(point_list))
+        self.assertEqual(set(point2tuples(h.points)), set(point2tuples(point_list)))
 
     def test_point_types(self):
         h = Hull()

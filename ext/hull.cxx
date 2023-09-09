@@ -1,6 +1,7 @@
 #include "hull.h"
 #include "pyref.h"
 #include <limits>
+#include <structmember.h>
 
 PyObject *Hull::py_new(PyTypeObject *type, PyObject *args, PyObject *kwds) {
     if (!PyArg_ParseTuple(args, ""))
@@ -13,13 +14,30 @@ PyObject *Hull::py_new(PyTypeObject *type, PyObject *args, PyObject *kwds) {
     return self.release();
 }
 
+void Hull::addPoint(const Point& p) {
+    data.floatPointsValid = false;
+    data.points.insert(IntPoint::fromPoint(data.precision, p));
+}
+
+void Hull::regenPoints() {
+    if (!data.floatPointsValid) {
+        data.floatPoints.clear();
+        for (const auto &p: data.points) {
+            data.floatPoints.push_back(p.toPoint(data.precision));
+        }
+        data.floatPointsValid = true;
+    }
+}
+
 void Hull::py_dealloc(PyObject *self) {
     reinterpret_cast<Hull*>(self)->data.~HullData();
     Py_TYPE(self)->tp_free(self);
 }
 
 PyObject* Hull::py_get_points(Hull *self, void *closure) {
-    const auto& points = self->data.points;
+    self->regenPoints();
+
+    const auto& points = self->data.floatPoints;
     PyRef list = PyRef::from_strong(PyList_New(points.size()));
     for (size_t i = 0; i < points.size(); i++) {
         PyRef p(PyRef::from_strong(_PyObject_New(&Point_type)));
@@ -49,11 +67,12 @@ int Hull::py_set_points(Hull *self, PyObject *list, void *closure) {
         }
     }
 
+    self->data.floatPointsValid = false;
     points.clear();
     points.reserve(size);
     for (size_t i = 0; i < size; i++) {
         auto p = reinterpret_cast<PyPoint*>(PyList_GetItem(list, i));
-        points.push_back(p->point);
+        self->addPoint(p->point);
     }
     return 0;
 }
@@ -63,12 +82,14 @@ PyObject* Hull::py_bounding_box(Hull *self, PyObject *args) {
         Py_RETURN_NONE;
     }
 
+    self->regenPoints();
+
     double xmin = std::numeric_limits<double>::infinity();
     double ymin = std::numeric_limits<double>::infinity();
     double xmax = -xmin;
     double ymax = -ymin;
 
-    for (const auto& p: self->data.points) {
+    for (const auto& p: self->data.floatPoints) {
         xmin = std::min(p.x, xmin);
         ymin = std::min(p.y, ymin);
         xmax = std::max(p.x, xmax);
@@ -87,7 +108,6 @@ PyObject* Hull::py_bounding_box(Hull *self, PyObject *args) {
 PyObject* Hull::py_point_bytes(Hull *self, PyObject *args) {
 
     uint32_t pointsCount = self->data.points.size();
-    auto hdrSize = 9;
 
     PyObject *buf = PyBytes_FromStringAndSize(NULL, 0);
     _PyBytes_Resize(&buf, sizeof(Point) * pointsCount);
@@ -98,7 +118,8 @@ PyObject* Hull::py_point_bytes(Hull *self, PyObject *args) {
     if (PyObject_GetBuffer(buf, &buf_view, 0) < 0)
         return nullptr;
 
-    memcpy(buf_view.buf, self->data.points.data(), sizeof(Point) * pointsCount);
+    self->regenPoints();
+    memcpy(buf_view.buf, self->data.floatPoints.data(), sizeof(Point) * pointsCount);
 
     PyBuffer_Release(&buf_view);
     return buf;
@@ -120,6 +141,11 @@ static PyMethodDef Hull_methods[] = {
     {NULL}
 };
 
+static PyMemberDef Hull_members[] = {
+    {"precision", T_DOUBLE, offsetof(Hull, data.precision), 0, "point rounding and merging"},
+    {NULL} 
+};
+
  PyTypeObject Hull_type = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "Hull",
@@ -128,6 +154,7 @@ static PyMethodDef Hull_methods[] = {
     .tp_dealloc = Hull::py_dealloc,
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_methods = Hull_methods,
+    .tp_members = Hull_members,
     .tp_getset = Hull_getset,
     .tp_new = Hull::py_new,
 };

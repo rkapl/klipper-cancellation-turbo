@@ -31,7 +31,7 @@ def test_cli_without():
             ".testing",
             *gcode_path.glob("*.gcode"),
         ]
-        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
+        with subprocess.Popen(command) as proc:
             proc.wait()
             assert proc.returncode == 0
     finally:
@@ -145,7 +145,6 @@ def test_cura():
     assert "EXCLUDE_OBJECT_DEFINE NAME=cube_1_stl" in definitions
     assert "EXCLUDE_OBJECT_DEFINE NAME=union_3_stl" in definitions
     assert "EXCLUDE_OBJECT_DEFINE NAME=cube_1_stl_1" in definitions
-
     assert results.count(f"EXCLUDE_OBJECT_START NAME=cylinder_2_stl") == 25
     assert results.count(f"EXCLUDE_OBJECT_END NAME=cylinder_2_stl") == 25
 
@@ -197,3 +196,13 @@ def test_issue_1_prusaslicer_point_collection():
 
     assert results.count(f"EXCLUDE_OBJECT_START NAME=Shape_Box_id_0_copy_0") == 125
     assert results.count(f"EXCLUDE_OBJECT_END NAME=Shape_Box_id_0_copy_0") == 125
+
+if __name__ == "__main__":
+    test_cli_without()
+    test_cura()
+    test_ideamaker()
+    test_issue_1_prusaslicer_point_collection()
+    test_m486()
+    test_prusaslicer()
+    test_slic3r()
+    test_superslicer()

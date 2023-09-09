@@ -4,17 +4,25 @@
 #include <Python.h>
 
 #include <vector>
+#include <unordered_set>
 #include "point.h"
 
 
 struct HullData {
-    std::vector<Point> points;
+    HullData(): floatPointsValid(false), precision(1) {}
+    bool floatPointsValid;
+    double precision;
+    std::unordered_set<IntPoint> points;
+    std::vector<Point> floatPoints;
 };
 
 struct Hull {
     PyObject_HEAD
     
     HullData data;
+
+    void addPoint(const Point& p);
+    void regenPoints();
 
     static PyObject *py_new(PyTypeObject *type, PyObject *args, PyObject *kwds);
     static void py_dealloc(PyObject *self);

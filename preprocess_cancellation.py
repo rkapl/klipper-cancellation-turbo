@@ -86,7 +86,7 @@ class SlicerProcessor:
         self.known_objects = {}
         self.interest_map = {}
         self.parser = GCodeParser()
-        self.last_object_id = None
+        self.current_object_id = None
 
     def register_interest(self, line, callback):
         id = len(self.interest_map) + 1
@@ -104,10 +104,17 @@ class SlicerProcessor:
     def slicer_header(self):
         return []
 
-    def start_object_id(self, object_id: str):
+    def define_object_id(self, object_id: str, name: str = None):
+        if name is None:
+            name = object_id
         if object_id not in self.known_objects:
-            self.known_objects[object_id] = KnownObject(_clean_id(object_id), Hull())
-            self.parser.hull = self.known_objects[object_id].hull
+            h = Hull()
+            h.precision = 1
+            self.known_objects[object_id] = KnownObject(_clean_id(name), h)
+        return self.known_objects[object_id].hull
+
+    def start_object_id(self, object_id: str, name: str = None):
+        self.parser.hull = self.define_object_id(object_id, name=name)
 
     def stop_object(self):
         self.parser.hull = None
@@ -117,7 +124,8 @@ class SlicerProcessor:
             points_array = numpy.frombuffer(hull.point_bytes())
             points_array.shape = (points_array.size // 2, 2)
             points = shapely.MultiPoint(points_array)
-            hull = points.convex_hull.simplify(0.5)
+            hull = points.convex_hull
+            #print(len(hull.exterior.coords))
             center = hull.centroid
             bb = [Point(x,y) for x,y in hull.exterior.coords]
         else:
@@ -142,11 +150,15 @@ class SlicerProcessor:
             )
 
     def output_object_start(self, id):
-        self.last_object_id = id
+        if self.current_object_id is not None:
+            yield from self.output_object_end()
+
+        self.current_object_id = id
         yield from object_start_marker(self.known_objects[id].name)
     
     def output_object_end(self):
-        yield from object_end_marker(self.known_objects[self.last_object_id].name)
+        yield from object_end_marker(self.known_objects[self.current_object_id].name)
+        self.current_object_id = None
 
 class SlicerSlic3rFamily(SlicerProcessor):
     @staticmethod
@@ -167,243 +179,102 @@ class SlicerSlic3rFamily(SlicerProcessor):
         yield from self.output_object_definitions()
 
 class SlicerCura(SlicerProcessor):
-    pass
+    last_time_elapsed: str
+
+    def _scan_elapsed(self, line):
+        self.last_time_elapsed = line
+
+    def _scan_mesh(self, line):
+        object_name = line.split(":", maxsplit=1)[1].strip()
+        if object_name == 'NONMESH':
+            return
+        self.start_object_id(object_name)
+
+    def slicer_start_scan(self):
+        self.last_time_elapsed = None
+
+        self.register_interest(';MESH', self._scan_mesh)
+        self.register_interest(';TIME_ELAPSED:', self._scan_elapsed)
+
+    def slicer_header(self):
+        yield from self.output_object_definitions()
+
+    def _output_mesh(self, line):
+        object_name = line.split(":", maxsplit=1)[1].strip()
+        if object_name == 'NONMESH':
+            return []
+        yield from self.output_object_start(object_name)
+
+    def _output_elapsed(self, line):
+        if self.last_time_elapsed == line and self.current_object_id:
+            self.output_object_end()
+
+    def slicer_start_output(self):
+        self.register_interest(';MESH', self._output_mesh)
+        self.register_interest(';TIME_ELAPSED:', self._output_elapsed)
 
 class SlicerIdeamaker(SlicerProcessor):
-    pass
+    def _scan_printing(self, line):
+        self.ideamaker_object_name = line.split(":")[1].strip()
+
+    def _scan_printing_id(self, line):
+        id = line.split(":")[1].strip()
+        # Ignore the internal non-object meshes
+        if id == "-1":
+            return
+        self.start_object_id(id, name=self.ideamaker_object_name)
+
+    def slicer_start_scan(self):
+        self.ideamaker_object_name = "unknown"
+        self.register_interest(';PRINTING:', self._scan_printing)
+        self.register_interest(';PRINTING_ID:', self._scan_printing_id)
+
+        # This one is funnier
+        # theres blocks like this, we can grab all these to get the names and ideamaker's IDs for them.
+        #   ;PRINTING: test_bed_part0.3mf
+        #   ;PRINTING_ID: 0
+
+    def _output_printing_id(self, line):
+        printing_id = line.split(":")[1].strip()
+        if printing_id == "-1":
+            return
+        yield from self.output_object_start(printing_id)
+
+    def _output_end(self, line):
+        if self.current_object_id is not None:
+            yield from self.output_object_end()
+
+    def slicer_start_output(self):
+        self.register_interest(';TOTAL_NUM:', lambda _: self.output_object_definitions())
+        self.register_interest(';PRINTING_ID:', self._output_printing_id)
+        self.register_interest(';REMAINING_TIME: 0', self._output_end)
 
 class SlicerM486(SlicerProcessor):
-    pass
+    def _scan_m486(self, line):
+        _, params = parse_gcode(line)
+        if "T" in params:
+            for i in range(-1, int(params["T"])):
+                self.define_object_id(str(i))
 
-def preprocess_pipe(infile):
-    yield from infile
+        elif "S" in params:
+            self.start_object_id(params["S"])
 
+    def _output_m486(self, line):
+        _, params = parse_gcode(line)
+        if "T" in params:
+            del self.known_objects["-1"]
+            yield from self.output_object_definitions()
+        elif "S" in params:
+            if params["S"] != "-1":
+                yield from self.output_object_start(params["S"])
 
-def preprocess_m486(infile):
-    known_objects: Dict[str, KnownObject] = {}
-    current_hull: Optional[HullTracker] = None
+        yield '; ' + line
 
-    for line in infile:
+    def slicer_start_scan(self):
+        self.register_interest('M486', self._scan_m486)
 
-        if line.startswith("M486"):
-            _, params = parse_gcode(line)
-            if "T" in params:
-                for i in range(-1, int(params["T"])):
-                    known_objects[f"{i}"] = KnownObject(f"{i}", HullTracker.create())
-
-            elif "S" in params:
-                current_hull = known_objects[params["S"]].hull
-
-        if current_hull and line.strip().lower().startswith("g"):
-            _, params = parse_gcode(line)
-            if float(params.get("E", -1)) > 0 and "X" in params and "Y" in params:
-                x = float(params["X"])
-                y = float(params["Y"])
-                current_hull.add_point(Point(x, y))
-
-    infile.seek(0)
-    current_object = None
-    for line in infile:
-        if line.upper().startswith("M486"):
-            _, params = parse_gcode(line)
-
-            if "T" in params:
-                # Inject custom marker
-                yield from header(len(known_objects))
-                for mesh_id, hull in known_objects.values():
-                    if mesh_id == "-1":
-                        continue
-
-                    yield from define_object(
-                        mesh_id,
-                        center=hull.center(),
-                        polygon=hull.exterior(),
-                    )
-
-            if "S" in params:
-                if current_object:
-                    yield from object_end_marker(current_object.name)
-                    current_object = None
-
-                if params["S"] != "-1":
-                    current_object = known_objects[params["S"]]
-                    yield from object_start_marker(current_object.name)
-
-            yield "; "  # Comment out the original M486 lines
-
-        yield line
-
-
-def preprocess_cura(infile):
-    known_objects: Dict[str, KnownObject] = {}
-    current_hull: Optional[HullTracker] = None
-    last_time_elapsed: str = None
-
-    # iterate the file twice, to be able to inject the header markers
-    for line in infile:
-        if line.startswith(";MESH:"):
-            object_name = line.split(":", maxsplit=1)[1].strip()
-            if object_name == "NONMESH":
-                continue
-            if object_name not in known_objects:
-                known_objects[object_name] = KnownObject(_clean_id(object_name), HullTracker.create())
-            current_hull = known_objects[object_name].hull
-
-        if current_hull and line.strip().lower().startswith("g"):
-            _, params = parse_gcode(line)
-            if float(params.get("E", -1)) > 0 and "X" in params and "Y" in params:
-                x = float(params["X"])
-                y = float(params["Y"])
-                current_hull.add_point(Point(x, y))
-
-        if line.startswith(";TIME_ELAPSED:"):
-            last_time_elapsed = line
-
-    infile.seek(0)
-    for line in infile:
-        yield line
-        if line.strip() and not line.startswith(";"):
-            break
-
-    # Inject custom marker
-    yield from header(len(known_objects))
-    for mesh_id, hull in known_objects.values():
-        yield from define_object(
-            mesh_id,
-            center=hull.center(),
-            polygon=hull.exterior(),
-        )
-
-    current_object = None
-    for line in infile:
-        yield line
-
-        if line.startswith(";MESH:"):
-            if current_object:
-                yield from object_end_marker(current_object)
-                current_object = None
-            mesh = line.split(":", maxsplit=1)[1].strip()
-            if mesh == "NONMESH":
-                continue
-            current_object, _ = known_objects[mesh]
-            yield from object_start_marker(current_object)
-
-        if line == last_time_elapsed and current_object:
-            yield from object_end_marker(current_object)
-            current_object = None
-
-    if current_object:
-        yield from object_end_marker(current_object)
-
-
-def preprocess_slicer(infile):
-
-    known_objects: Dict[str, KnownObject] = {}
-    current_hull: Optional[HullTracker] = None
-    for line in infile:
-        if line.startswith("; printing object "):
-            object_id = line.split("printing object")[1].strip()
-            if object_id not in known_objects:
-                known_objects[object_id] = KnownObject(_clean_id(object_id), HullTracker.create())
-            current_hull = known_objects[object_id].hull
-
-        if line.startswith("; stop printing object "):
-            current_hull = None
-
-        if current_hull and line.strip().lower().startswith("g"):
-            command, params = parse_gcode(line)
-            if float(params.get("E", -1)) > 0 and "X" in params and "Y" in params:
-                x = float(params["X"])
-                y = float(params["Y"])
-                current_hull.add_point(Point(x, y))
-
-    infile.seek(0)
-    for line in infile:
-        yield line
-        if line.strip() and not line.startswith(";"):
-            break
-
-    yield from header(len(known_objects))
-    for object_id, hull in known_objects.values():
-        yield from define_object(
-            object_id,
-            center=hull.center(),
-            polygon=hull.exterior(),
-        )
-
-    for line in infile:
-        yield line
-
-        if line.startswith("; printing object "):
-            yield from object_start_marker(known_objects[line.split("printing object")[1].strip()].name)
-
-        if line.startswith("; stop printing object "):
-            yield from object_end_marker(known_objects[line.split("printing object")[1].strip()].name)
-
-
-def preprocess_ideamaker(infile):
-    # This one is funnier
-    # theres blocks like this, we can grab all these to get the names and ideamaker's IDs for them.
-    #   ;PRINTING: test_bed_part0.3mf
-    #   ;PRINTING_ID: 0
-
-    known_objects: Dict[str, KnownObject] = {}
-    current_hull: HullTracker = None
-
-    for line in infile:
-        if line.startswith(";PRINTING:"):
-            name = line.split(":")[1].strip()
-            id_line = next(infile)
-            assert id_line.startswith(";PRINTING_ID:")
-            id = id_line.split(":")[1].strip()
-            # Ignore the internal non-object meshes
-            if id == "-1":
-                continue
-            if id not in known_objects:
-                known_objects[id] = KnownObject(_clean_id(name), HullTracker.create())
-            current_hull = known_objects[id].hull
-
-        if current_hull and line.strip().lower().startswith("g"):
-            command, params = parse_gcode(line)
-            if float(params.get("E", -1)) > 0 and "X" in params and "Y" in params:
-                x = float(params["X"])
-                y = float(params["Y"])
-                current_hull.add_point(Point(x, y))
-
-    infile.seek(0)
-
-    current_object: Optional[KnownObject] = None
-    for line in infile:
-        yield line
-
-        if line.startswith(";TOTAL_NUM:"):
-            total_num = int(line.split(":")[1].strip())
-            assert total_num == len(known_objects)
-            yield from header(total_num)
-            for id, (name, hull) in known_objects.items():
-                yield from define_object(
-                    name,
-                    center=hull.center(),
-                    polygon=hull.exterior(),
-                )
-
-        if line.startswith(";PRINTING_ID:"):
-            printing_id = line.split(":")[1].strip()
-            if current_object:
-                yield from object_end_marker(current_object.name)
-                current_object = None
-            if printing_id == "-1":
-                continue
-            current_object = known_objects[printing_id]
-            yield from object_start_marker(current_object.name)
-
-        if line == ";REMAINING_TIME: 0\n" and current_object:
-            yield from object_end_marker(current_object.name)
-            current_object = None
-
-    if current_object:
-        yield from object_end_marker(current_object.name)
-
+    def slicer_start_output(self):
+        self.register_interest('M486', self._output_m486)
 
 # Note:
 #   Slic3r:     does not output any markers into GCode
@@ -447,12 +318,32 @@ def _process_lines(infile, slicer_factory):
 
     yield from slicer.slicer_header()
     for line in infile:
-        yield line
         r = slicer.parser.feed_line(line) 
         if r is not None:
             more = slicer.interest_map[r](line)
             if more is not None:
                 yield from more
+        else:
+            yield line
+
+    if slicer.current_object_id is not None:
+        yield from slicer.output_object_end()
+
+# These methods are for compatibility with Moonraker and other API users
+def preprocess_pipe(infile):
+    yield from infile
+
+def preprocess_slicer(infile):
+    yield from _process_lines(infile, slicer_factory=SlicerSlic3rFamily)
+
+def preprocess_cura(infile):
+    yield from _process_lines(infile, slicer_factory=SlicerCura)
+
+def preprocess_ideamaker(infile):
+    yield from _process_lines(infile, slicer_factory=SlicerIdeamaker)
+
+def preprocess_m486(infile):
+    yield from _process_lines(infile, slicer_factory=SlicerM486)
 
 def preprocessor(infile, outfile, slicer_factory=None):
     I_PROCESSED = 1

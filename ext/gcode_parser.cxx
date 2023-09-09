@@ -214,7 +214,7 @@ PyObject *GCodeParser::py_feed_line(GCodeParser *self, PyObject *args)
         }
         if (e > 0) {
             auto hull = self->data.currentHull.cast<Hull>();
-            hull->data.points.emplace_back(x, y);
+            hull->addPoint(Point(x, y));
         }
     }
 
