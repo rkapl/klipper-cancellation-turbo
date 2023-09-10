@@ -6,6 +6,9 @@ readme = "README.md"
 authors = ["Franklyn Tackitt <im@frank.af>"]
 repository = "https://github.com/kageurufu/cancelobject-preprocessor"
 license = "GPL-3.0-only"
+include =  [
+    "ext/**"
+]
 
 [tool.poetry.build]
 script = "build.py"

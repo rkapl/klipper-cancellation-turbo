@@ -88,7 +88,7 @@ void GCodeParser::py_dealloc(PyObject *self) {
 }
 
 int GCodeParser::py_set_hull(GCodeParser *self, PyObject *v, void *closure) {
-    if (Py_IsNone(v)) {
+    if (v == Py_None) {
         self->data.currentHull.reset();
         return 0;
     }
@@ -274,14 +274,20 @@ PyInit_preprocess_cancellation_cext(void)
     if (!m)
         return nullptr;
 
-    if (PyModule_AddObjectRef(m.get(), "GCodeParser", reinterpret_cast<PyObject*>(&GCodeParser_type)) < 0)
+    if (PyModule_AddObject(m.get(), "GCodeParser", reinterpret_cast<PyObject*>(&GCodeParser_type)) < 0) {
+	Py_DECREF(&GCodeParser_type);
         return nullptr;
+    }
 
-    if (PyModule_AddObjectRef(m.get(), "Hull", reinterpret_cast<PyObject*>(&Hull_type)) < 0)
+    if (PyModule_AddObject(m.get(), "Hull", reinterpret_cast<PyObject*>(&Hull_type)) < 0) {
+	Py_DECREF(&Hull_type);
         return nullptr;
+    }
 
-    if (PyModule_AddObjectRef(m.get(), "Point", reinterpret_cast<PyObject*>(&Point_type)) < 0)
+    if (PyModule_AddObject(m.get(), "Point", reinterpret_cast<PyObject*>(&Point_type)) < 0) {
+	Py_DECREF(&Point_type);
         return nullptr;
+    }
     
     return m.release();
 }

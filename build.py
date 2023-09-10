@@ -28,4 +28,8 @@ class ExtBuilder(build_ext):
 
 
 def build(setup_kwargs):
-    setup_kwargs.update({"ext_modules": extensions, "cmdclass": {"build_ext": ExtBuilder}})
+    setup_kwargs.update({
+        "ext_modules": extensions,
+        "cmdclass": {"build_ext": ExtBuilder},
+        "zip_safe": False,
+    })
