@@ -18,6 +18,7 @@ __version__ = "0.2.0"
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO)
 logger = logging.getLogger("prepropress_cancellation")
+precision = 0.5
 
 shapely = None
 try:
@@ -67,8 +68,11 @@ def define_object(
     yield f"EXCLUDE_OBJECT_DEFINE NAME={name}"
     if center:
         yield f" CENTER={center.x:0.3f},{center.y:0.3f}"
+    
+    # It is simple json but it is difficult to get control over the float precision, so we do this manually
     if polygon:
-        yield f" POLYGON={json.dumps([[p.x, p.y] for p in polygon])}"
+        json_points = ','.join(f'[{p.x:0.3f},{p.y:0.3f}]' for p in polygon)
+        yield f" POLYGON=[{json_points}]"
     yield "\n"
 
 
@@ -109,7 +113,7 @@ class SlicerProcessor:
             name = object_id
         if object_id not in self.known_objects:
             h = Hull()
-            h.precision = 1
+            h.precision = precision
             self.known_objects[object_id] = KnownObject(_clean_id(name), h)
         return self.known_objects[object_id].hull
 
@@ -124,7 +128,7 @@ class SlicerProcessor:
             points_array = numpy.frombuffer(hull.point_bytes())
             points_array.shape = (points_array.size // 2, 2)
             points = shapely.MultiPoint(points_array)
-            hull = points.convex_hull
+            hull = points.convex_hull.simplify(0.02, preserve_topology=False)
             #print(len(hull.exterior.coords))
             center = hull.centroid
             bb = [Point(x,y) for x,y in hull.exterior.coords]

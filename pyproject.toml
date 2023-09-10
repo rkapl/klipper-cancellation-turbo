@@ -39,7 +39,7 @@ shapely = "*"
 line_length = 120
 
 [tool.pytest.ini_options]
-addopts = '-v --cov=preprocess_cancellation'
+#addopts = '-v --cov=preprocess_cancellation'
 
 [tool.coverage.run]
 branch = true
