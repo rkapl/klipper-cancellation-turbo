@@ -1,6 +1,8 @@
 Klipper GCode Preprocessor for Object Cancellation
 ==================================================
 
+
+
 This preprocessor modifies GCode files to add klipper's exclude object gcode.
 
 The following slicers are supported:
@@ -10,6 +12,10 @@ The following slicers are supported:
 * Slic3r
 * Cura
 * IdeaMaker
+
+## This Fork
+
+Uses some native code for pretty nice speedup when processing giant file.s
 
 ## Installation and usage
 
